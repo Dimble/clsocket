@@ -173,10 +173,23 @@ bool CSimpleSocket::BindInterface(uint8 *pInterface)
     {
         if (pInterface)
         {
-            stInterfaceAddr.s_addr= inet_addr((const char *)pInterface);
-            if (SETSOCKOPT(m_socket, IPPROTO_IP, IP_MULTICAST_IF, &stInterfaceAddr, sizeof(stInterfaceAddr)) == SocketSuccess)
+            //stInterfaceAddr.s_addr= inet_addr((const char *)pInterface);
+            int ret_pton = inet_pton(AF_INET, (const char *)pInterface, &stInterfaceAddr.s_addr);
+            if (ret_pton == 1)
             {
-                bRetVal = true;
+                if (SETSOCKOPT(m_socket, IPPROTO_IP, IP_MULTICAST_IF, &stInterfaceAddr, sizeof(stInterfaceAddr)) == SocketSuccess)
+                {
+                    bRetVal = true;
+                }
+            }
+            // TODO  useful errors for these
+            else if (ret_pton == 0)  // invalid address in pInterface
+            {
+                bRetVal = false;
+            }
+            else  // error..
+            {
+                bRetVal = false;
             }
         }
     }
@@ -725,10 +738,9 @@ int32 CSimpleSocket::Receive(int32 nMaxBytes)
     }
 
     //--------------------------------------------------------------------------
-    // Free existing buffer and allocate a new buffer the size of
-    // nMaxBytes.
+    // Free existing buffer if more space is needed.
     //--------------------------------------------------------------------------
-    if ((m_pBuffer != NULL) && (nMaxBytes != m_nBufferSize))
+    if ((m_pBuffer != NULL) && (nMaxBytes > m_nBufferSize))
     {
         delete [] m_pBuffer;
         m_pBuffer = NULL;
@@ -814,6 +826,120 @@ int32 CSimpleSocket::Receive(int32 nMaxBytes)
         }
     }
 
+    return m_nBytesReceived;
+}
+
+
+//------------------------------------------------------------------------------
+//
+// ReceiveAvailable() - Like Receive, but may be necessary to avoid blocking.
+//          Reads the currently available bytes up to nMaxBytes.  Note that
+//          since 0 can be returned as the number of bytes read, -2 indicates
+//          a closed connection.  Uses the same buffer as Receive.
+//
+//------------------------------------------------------------------------------
+
+int32 CSimpleSocket::ReceiveAvailable(int32 maxBytes)
+{
+    m_nBytesReceived = 0;
+
+    if (IsSocketValid() == false)
+        return CSimpleSocket::SocketError;
+
+    //--------------------------------------------------------------------------
+    // Free and remake buffer if more space is needed
+    //--------------------------------------------------------------------------
+    if ((m_pBuffer != nullptr) && (maxBytes > m_nBufferSize))
+    {
+        delete [] m_pBuffer;
+        m_pBuffer = nullptr;
+    }
+    if (m_pBuffer == nullptr)
+        m_pBuffer = new uint8[m_nBufferSize = maxBytes];
+
+    SetSocketError(SocketSuccess);
+
+    m_timer.Initialize();
+    m_timer.SetStartTime();
+
+    switch (m_nSocketType)
+    {
+        case CSimpleSocket::SocketTypeTcp:
+            do
+            {
+#ifdef WIN32
+                u_long available = 0;
+                if ( ioctlsocket(m_socket, FIONREAD, &available) != 0 )
+#else
+                // untested
+                int available = 0;
+                if ( ioctl(m_socket, FIONREAD, &available) != 0 )
+#endif
+                {
+                    TranslateSocketError();
+                    m_nBytesReceived = CSimpleSocket::SocketError;
+                    break;
+                }
+                if ( available == 0 )
+                    break;
+
+                int received = RECV(m_socket, m_pBuffer + m_nBytesReceived,
+                                    min((int32)available, maxBytes - m_nBytesReceived),
+                                    m_nFlags);
+                if ( received > 0 )
+                {
+                    m_nBytesReceived += received;
+                }
+                else if ( received == 0 )
+                {
+                    TranslateSocketError();
+                    m_nBytesReceived = -2;
+                    break;
+                }
+                else
+                {
+                    TranslateSocketError();
+                    if (GetSocketError() != CSimpleSocket::SocketInterrupted)
+                        {
+                        m_nBytesReceived = CSimpleSocket::SocketError;
+                        break;
+                        }
+                }
+            } while (m_nBytesReceived < maxBytes);
+
+            break;
+
+        // TODO  not implemented; this is just copied from Receive
+        case CSimpleSocket::SocketTypeUdp:
+        {
+            uint32 srcSize = sizeof(struct sockaddr_in);
+
+            if (GetMulticast())
+            {
+                do
+                {
+                    m_nBytesReceived = RECVFROM(m_socket, m_pBuffer, maxBytes, 0,
+                                                &m_stMulticastGroup, &srcSize);
+                    TranslateSocketError();
+                } while (GetSocketError() == CSimpleSocket::SocketInterrupted);
+            }
+            else
+            {
+                do
+                {
+                    m_nBytesReceived = RECVFROM(m_socket, m_pBuffer, maxBytes, 0,
+                                                &m_stClientSockaddr, &srcSize);
+                    TranslateSocketError();
+                } while (GetSocketError() == CSimpleSocket::SocketInterrupted);
+            }
+
+            break;
+        }
+        default:
+            break;
+    }
+
+    m_timer.SetEndTime();
     return m_nBytesReceived;
 }
 
@@ -906,7 +1032,7 @@ int32 CSimpleSocket::SendFile(int32 nOutFd, int32 nInFd, off_t *pOffset, int32 n
     static char szData[SOCKET_SENDFILE_BLOCKSIZE];
     int32       nInCount = 0;
 
-    if (lseek(nInFd, *pOffset, SEEK_SET) == -1)
+    if (_lseek(nInFd, *pOffset, SEEK_SET) == -1)
     {
         return -1;
     }
@@ -915,7 +1041,7 @@ int32 CSimpleSocket::SendFile(int32 nOutFd, int32 nInFd, off_t *pOffset, int32 n
     {
         nInCount = (nCount - nOutCount) < SOCKET_SENDFILE_BLOCKSIZE ? (nCount - nOutCount) : SOCKET_SENDFILE_BLOCKSIZE;
 
-        if ((read(nInFd, szData, nInCount)) != (int32)nInCount)
+        if ((_read(nInFd, szData, nInCount)) != (int32)nInCount)
         {
             return -1;
         }
@@ -1118,7 +1244,7 @@ const char *CSimpleSocket::DescribeError(CSocketError err)
 // Select()
 //
 //------------------------------------------------------------------------------
-bool CSimpleSocket::Select(int32 nTimeoutSec, int32 nTimeoutUSec)
+bool CSimpleSocket::Select(int32 nTimeoutSec, int32 nTimeoutUSec, bool checkRead, bool checkWrite)
 {
     bool            bRetVal = false;
     struct timeval *pTimeout = NULL;
@@ -1130,8 +1256,10 @@ bool CSimpleSocket::Select(int32 nTimeoutSec, int32 nTimeoutUSec)
     FD_ZERO(&m_readFds);
     FD_ZERO(&m_writeFds);
     FD_SET(m_socket, &m_errorFds);
-    FD_SET(m_socket, &m_readFds);
-    FD_SET(m_socket, &m_writeFds);
+    if ( checkRead )
+        FD_SET(m_socket, &m_readFds);
+    if ( checkWrite )
+        FD_SET(m_socket, &m_writeFds);
 
     //---------------------------------------------------------------------
     // If timeout has been specified then set value, otherwise set timeout
@@ -1146,7 +1274,6 @@ bool CSimpleSocket::Select(int32 nTimeoutSec, int32 nTimeoutUSec)
     }
 
     nNumDescriptors = SELECT(m_socket+1, &m_readFds, &m_writeFds, &m_errorFds, pTimeout);
-//    nNumDescriptors = SELECT(m_socket+1, &m_readFds, NULL, NULL, pTimeout);
 
     //----------------------------------------------------------------------
     // Handle timeout

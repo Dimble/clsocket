@@ -78,6 +78,9 @@
 #include <winsock2.h>
 #include <Ws2tcpip.h>
 
+// FIXME  remove this and update stuff
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+
 #define IPTOS_LOWDELAY  0x10
 
 #endif
@@ -181,8 +184,8 @@ public:
     /// for writing, or have an exceptional condition pending, respectively.
     /// Block until an event happens on the specified file descriptors.
     /// @return true if socket has data ready, or false if not ready or timed out.
-    virtual bool Select(void) {
-        return Select(0,0);
+    virtual bool Select(bool checkRead = true, bool checkWrite = true) {
+        return Select(0, 0, checkRead, checkWrite);
     };
 
     /// Examine the socket descriptor sets currently owned by the instance of
@@ -192,7 +195,7 @@ public:
     /// @param nTimeoutSec timeout in seconds for select.
     /// @param nTimeoutUSec timeout in micro seconds for select.
     /// @return true if socket has data ready, or false if not ready or timed out.
-    virtual bool Select(int32 nTimeoutSec, int32 nTimeoutUSec);
+    virtual bool Select(int32 nTimeoutSec, int32 nTimeoutUSec, bool checkRead = true, bool checkWrite = true);
 
     /// Does the current instance of the socket object contain a valid socket
     /// descriptor.
@@ -219,6 +222,13 @@ public:
     /// @return of zero means the connection has been shutdown on the other side.
     /// @return of -1 means that an error has occurred.
     virtual int32 Receive(int32 nMaxBytes = 1);
+
+    /// Attempts to receive currently available data on an established connection.
+    /// @param nMaxBytes maximum number of bytes to receive.
+    /// @return number of bytes actually received: can be zero.
+    /// @return of -1 means that an error has occurred.
+    /// @return of -2 means the connection has been shutdown.
+    virtual int32 ReceiveAvailable(int32 nMaxBytes = 1);
 
     /// Attempts to send a block of data on an established connection.
     /// @param pBuf block of data to be sent.
@@ -449,7 +459,9 @@ public:
     /// Returns clients Internet host address as a string in standard numbers-and-dots notation.
     ///  @return NULL if invalid
     uint8 *GetClientAddr() {
-        return (uint8 *)inet_ntoa(m_stClientSockaddr.sin_addr);
+        static char result[INET_ADDRSTRLEN + 1];
+//        return (uint8 *)inet_ntoa(m_stClientSockaddr.sin_addr);
+        return (uint8 *)inet_ntop(AF_INET, &m_stClientSockaddr.sin_addr, result, INET_ADDRSTRLEN);
     };
 
     /// Returns the port number on which the client is connected.
@@ -461,7 +473,10 @@ public:
     /// Returns server Internet host address as a string in standard numbers-and-dots notation.
     ///  @return NULL if invalid
     uint8 *GetServerAddr() {
-        return (uint8 *)inet_ntoa(m_stServerSockaddr.sin_addr);
+        static char result[INET_ADDRSTRLEN + 1];
+//        return (uint8 *)inet_ntoa(m_stServerSockaddr.sin_addr);
+        return (uint8 *)inet_ntop(AF_INET, &m_stServerSockaddr.sin_addr, result, INET_ADDRSTRLEN);
+
     };
 
     /// Returns the port number on which the server is connected.
